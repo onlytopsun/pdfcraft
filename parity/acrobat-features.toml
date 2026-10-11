@@ -758,8 +758,8 @@ milestone = "M2"
 status = "partial"
 commands = []
 tools = []
-evidence = ["crates/render/src/raster.rs::huge_cid_width_ranges_terminate", "crates/render/src/raster.rs::non_embedded_japanese_cid_fonts_draw_with_a_craft_fonts_face", "crates/render/src/raster.rs::mincho_substitute_covers_half_width_katakana"]
-notes = "CID-to-Unicode tables are M2.4; a non-embedded Adobe-Japan1 font is drawn in a craft-fonts Japanese face (Mincho or Gothic by name; BIZ UDMincho for Mincho, which covers half-width katakana) when built with craft-fonts; non-embedded GB1, CNS1 and Korea1 fonts still draw nothing (no allowed face)"
+evidence = ["crates/render/src/raster.rs::huge_cid_width_ranges_terminate", "crates/render/src/raster.rs::non_embedded_japanese_cid_fonts_draw_with_a_craft_fonts_face", "crates/render/src/raster.rs::mincho_substitute_covers_half_width_katakana", "crates/render/src/raster.rs::non_embedded_chinese_cid_fonts_draw_with_a_craft_fonts_face", "crates/render/src/raster.rs::identity_cid_fonts_without_to_unicode_draw_notdef_not_garbled_glyphs", "crates/render/src/text.rs::non_embedded_chinese_fonts_extract_via_the_ucs2_cmap"]
+notes = "CID-to-Unicode tables are M2.4; a non-embedded Adobe-Japan1 font is drawn in a craft-fonts Japanese face (Mincho or Gothic by name; BIZ UDMincho for Mincho, which covers half-width katakana) when built with craft-fonts; a non-embedded Adobe-GB1 or Adobe-CNS1 font is drawn in the craft-fonts Hans face (LXGW WenKai) when built with craft-fonts — hayro synthesizes a ToUnicode from the collection's UCS2 CMap, so Unicode (UniGB-UCS2-H/UniCNS-UCS2-H) and GBK-EUC-H encodings both work; without craft-fonts, GB1/CNS1 still draw nothing; a fallback Adobe-Identity font draws .notdef instead of an unrelated glyph; Korea1 still draws nothing (no allowed Hangul face); extraction of embedded CID fonts without ToUnicode is M2.4"
 
 [[feature]]
 id = "view.render-image-codecs"

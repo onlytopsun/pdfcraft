@@ -31,6 +31,8 @@ jobs:
 
       # The optional craft-fonts build input (Japanese fonts), so the Japanese font tests run on
       # Linux; Windows tests the build without it. See craftrules standards/fonts.md.
+      # TODO: bump this ref once the LXGW WenKai commit lands on storytold/craft-fonts, so the
+      # Chinese CID-fallback tests run on Linux too.
       - name: Check out craft-fonts (Linux)
         if: runner.os == 'Linux'
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0

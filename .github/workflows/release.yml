@@ -73,6 +73,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       # The craft-fonts build input (Japanese fonts): every release embeds it. Bump deliberately.
+      # TODO: once the LXGW WenKai commit lands on storytold/craft-fonts, bump this ref (and the
+      # five other craft-fonts refs below) so releases embed the Hans face for Chinese CID fallback.
       - name: Check out craft-fonts
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
