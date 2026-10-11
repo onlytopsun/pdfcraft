@@ -916,6 +916,38 @@ mod tests {
         }
     }
 
+    /// A Chinese CID font that isn't embedded and has no `/ToUnicode` (Adobe-GB1, as `STSong-Light`
+    /// with `UniGB-UCS2-H` or `SimSun` with `GBK-EUC-H`): hayro maps its CIDs to Unicode through
+    /// the collection's UCS2 CMap, so the text is searchable and copyable, and the renderer's
+    /// craft-fonts substitute draws it the same way. Runs with or without craft-fonts.
+    #[test]
+    fn non_embedded_chinese_fonts_extract_via_the_ucs2_cmap() {
+        use lopdf::{Document, Object, Stream, dictionary};
+        for (encoding, codes) in [("UniGB-UCS2-H", "4E2D56FD"), ("GBK-EUC-H", "D6D0B9FA")] {
+            let mut doc = Document::with_version("1.7");
+            let descriptor = doc.add_object(dictionary! { "Type" => "FontDescriptor", "FontName" => "STSong-Light", "Flags" => 4, "FontBBox" => vec![Object::Integer(-25), Object::Integer(-254), Object::Integer(1000), Object::Integer(880)], "ItalicAngle" => 0, "Ascent" => 880, "Descent" => -120, "CapHeight" => 680, "StemV" => 80 });
+            let cid = doc.add_object(dictionary! {
+                "Type" => "Font", "Subtype" => "CIDFontType0", "BaseFont" => "STSong-Light",
+                "CIDSystemInfo" => dictionary! { "Registry" => Object::string_literal("Adobe"), "Ordering" => Object::string_literal("GB1"), "Supplement" => 5 },
+                "FontDescriptor" => descriptor,
+                "DW" => 1000
+            });
+            let font = doc.add_object(dictionary! { "Type" => "Font", "Subtype" => "Type0", "BaseFont" => "STSong-Light", "Encoding" => encoding, "DescendantFonts" => vec![Object::Reference(cid)] });
+            let content = doc.add_object(Stream::new(dictionary! {}, format!("BT /F1 20 Tf 1 0 0 1 40 280 Tm <{codes}> Tj ET").into_bytes()));
+            let pages = doc.new_object_id();
+            let page = doc.add_object(dictionary! { "Type" => "Page", "Parent" => pages, "MediaBox" => vec![Object::Integer(0), Object::Integer(0), Object::Integer(300), Object::Integer(300)], "Resources" => dictionary! {"Font" => dictionary! {"F1" => font}}, "Contents" => content });
+            doc.objects.insert(pages, dictionary! {"Type" => "Pages", "Kids" => vec![Object::Reference(page)], "Count" => 1}.into());
+            let catalog = doc.add_object(dictionary! {"Type" => "Catalog", "Pages" => pages});
+            doc.trailer.set("Root", catalog);
+            let mut bytes = Vec::new();
+            doc.save_to(&mut bytes).unwrap();
+            let pdf = Pdf::new(std::sync::Arc::new(bytes)).unwrap();
+            let text = extract_page(&pdf, 0, &InterpreterSettings::default()).unwrap();
+            assert_eq!(text.plain_text(), "中国", "{encoding}");
+            assert_eq!(text.find("中国"), vec![0..2]);
+        }
+    }
+
     /// One page per text matrix, each showing `codes` in Helvetica whose `/ToUnicode` maps the
     /// codes in `unicode` (a `bfchar` body) to several characters.
     fn ligature_pages(unicode: &str, codes: &str, matrices: &[&str]) -> Pdf {

@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use work_queue::{ResultReceiver, WorkQueue};
 
-use hayro::hayro_interpret::font::{FontData, FontQuery};
+use hayro::hayro_interpret::font::{FallbackFontQuery, FontData, FontQuery};
 use hayro::hayro_interpret::hayro_cmap::CidFamily;
 use hayro::hayro_interpret::{InterpreterSettings, InterpreterWarning};
 use hayro::hayro_syntax::Pdf;
@@ -69,22 +69,36 @@ impl RenderConfig {
         InterpreterSettings {
             ocg_overrides: self.layers.clone(),
             hide_comments: self.hide_comments,
-            font_resolver: Arc::new(move |query| japanese_fallback(query).or_else(|| standard(query))),
+            font_resolver: Arc::new(move |query| cjk_fallback(query).or_else(|| standard(query))),
             ..InterpreterSettings::default()
         }
     }
 }
 
-/// A Japanese face from craft-fonts for a CID font of the Adobe-Japan1 collection that the PDF
-/// doesn't embed (`HeiseiMin-W3`, `KozGoPro-Medium`, …). hayro's own substitutes for fonts that
-/// aren't embedded are the Latin standard 14, so such text drew nothing. `None` for every other
-/// font, and when PdfCraft was built without craft-fonts. Only Japanese: the pinned craft-fonts
-/// has no other CJK faces, and its later Chinese face is Noto CJK, which AGENTS.md §1.1 rules out.
-fn japanese_fallback(query: &FontQuery) -> Option<(FontData, u32)> {
+/// A CJK face from craft-fonts for a CID font of an Adobe CJK collection that the PDF doesn't
+/// embed (`HeiseiMin-W3`, `STSong-Light`, `MSung-Light`, …). hayro's own substitutes for fonts
+/// that aren't embedded are the Latin standard 14, so such text drew nothing. `None` for every
+/// other font, and when PdfCraft was built without craft-fonts. Japanese and Chinese only: the
+/// pinned craft-fonts has no Hangul face, and a non-embedded Adobe-Identity font has no CID to
+/// Unicode map a substitute could follow (it draws .notdef, never garbage).
+fn cjk_fallback(query: &FontQuery) -> Option<(FontData, u32)> {
     let FontQuery::Fallback(f) = query else { return None };
-    if f.character_collection.as_ref()?.family != CidFamily::AdobeJapan1 {
-        return None;
+    match f.character_collection.as_ref()?.family {
+        CidFamily::AdobeJapan1 => japanese_fallback_face(f),
+        // hayro maps the font's CIDs to Unicode through the collection's UCS2 CMap
+        // (UniGB-UCS2-H, UniCNS-UCS2-H) and then finds each character in this face's cmap.
+        // One Regular face stands in for every style, as the Japanese path does when a weight
+        // is missing (no synthetic weight).
+        CidFamily::AdobeGB1 | CidFamily::AdobeCNS1 => {
+            let face = pdfcraft_fonts::document_chinese_font()?;
+            Some((Arc::new(face.bytes), 0))
+        }
+        // AdobeKorea1: no allowed Hangul face. AdobeIdentity and the rest: nothing to map by.
+        _ => None,
     }
+}
+
+fn japanese_fallback_face(f: &FallbackFontQuery) -> Option<(FontData, u32)> {
     let face = match japanese_face(f.post_script_name.as_deref().unwrap_or_default(), f.is_serif, f.is_bold || f.font_weight >= 600) {
         // BIZ UDMincho before the document face (Shippori Mincho): it covers half-width katakana
         // (U+FF61–U+FF9F), which Shippori Mincho lacks, and a character the substitute lacks is
@@ -4682,6 +4696,98 @@ trailer << /Root 1 0 R >>
         }
     }
 
+    /// A Chinese CID font that isn't embedded (Adobe-GB1 as `STSong-Light` with
+    /// `UniGB-UCS2-H`, Adobe-CNS1 as `MSung-Light` with `UniCNS-UCS2-H`) drew nothing: hayro's
+    /// substitutes for fonts that aren't embedded are Latin-only. With craft-fonts and a Hans
+    /// face (the build input release builds embed), such text now draws in that face; without
+    /// either, nothing changes.
+    #[test]
+    fn non_embedded_chinese_cid_fonts_draw_with_a_craft_fonts_face() {
+        let pdf = |base_font: &str, encoding: &str, ordering: &str, supplement: u32, code: &str| {
+            let content = format!("BT /F1 40 Tf 5 15 Td <{code}> Tj ET");
+            format!(
+                "%PDF-1.7
+1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj
+2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj
+3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 100 60] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >> endobj
+4 0 obj << /Length {} >> stream
+{content}
+endstream endobj
+5 0 obj << /Type /Font /Subtype /Type0 /BaseFont /{base_font} /Encoding /{encoding} /DescendantFonts [6 0 R] >> endobj
+6 0 obj << /Type /Font /Subtype /CIDFontType0 /BaseFont /{base_font} /CIDSystemInfo << /Registry (Adobe) /Ordering ({ordering}) /Supplement {supplement} >>
+  /FontDescriptor 7 0 R /DW 1000 >> endobj
+7 0 obj << /Type /FontDescriptor /FontName /{base_font} /Flags 4 /FontBBox [0 -141 1000 859] /ItalicAngle 0 /Ascent 859 /Descent -141 /CapHeight 700 /StemV 80 >> endobj
+trailer << /Root 1 0 R >>
+%%EOF",
+                content.len()
+            )
+        };
+        for (base_font, encoding, ordering, supplement, code) in [
+            ("STSong-Light", "UniGB-UCS2-H", "GB1", 5, "4E2D56FD"),  // 中国
+            ("SimSun", "GBK-EUC-H", "GB1", 5, "D6D0B9FA"),           // 中国 in GBK
+            ("MSung-Light", "UniCNS-UCS2-H", "CNS1", 0, "4E2D6587"), // 中文
+        ] {
+            let mut r = PageRenderer::new(Arc::new(pdf(base_font, encoding, ordering, supplement, code).into_bytes()), RenderConfig::default());
+            let p = r.render(RenderRequest { page: 0, kind: RequestKind::Pixels, tile: None, scale: 1.0, tag: 0 });
+            assert!(p.error.is_none(), "{base_font}: {:?}", p.error);
+            if pdfcraft_fonts::document_chinese_font().is_none() {
+                eprintln!("built without craft-fonts (CRAFT_FONTS_DIR unset): no Hans face to check");
+                continue;
+            }
+            let inked = p.rgba.as_chunks::<4>().0.iter().filter(|c| c[0] < 128).count();
+            // Two characters at 40 pt cover a few hundred dark pixels; a blank or missing-glyph run doesn't.
+            assert!(inked > 300, "{base_font}: Chinese is drawn ({inked} dark pixels)");
+        }
+    }
+
+    /// The Hans substitute must have the common Chinese characters: one that lacks them draws
+    /// them as .notdef. The full GB2312 level-1 sample is checked when choosing the face in
+    /// craft-fonts; this keeps the renderer honest about the face it actually picks.
+    #[test]
+    fn chinese_substitute_covers_common_hans_characters() {
+        use skrifa::MetadataProvider;
+        let Some(face) = pdfcraft_fonts::document_chinese_font() else {
+            eprintln!("built without craft-fonts (CRAFT_FONTS_DIR unset): no Hans face to check");
+            return;
+        };
+        let font = skrifa::FontRef::from_index(face.bytes, 0).expect("a craft-fonts face parses");
+        let charmap = font.charmap();
+        let missing: Vec<char> = "的一是在不了有和人这中大为上个国我以要他时来用们生到作地于出就分对成会可主发年动同工也能下过子说产种面而方后多定行学法所民得经十三之进着等部度家电力里如水化高自二理起小物"
+            .chars()
+            .filter(|&c| charmap.map(c).is_none())
+            .collect();
+        assert!(missing.is_empty(), "the Hans substitute {} lacks {missing:?}", face.name());
+    }
+
+    /// A substitute can stand in only for the collections a craft-fonts face covers: none for
+    /// Adobe-Korea1 (no Hangul face), none for Adobe-Identity (no CID to Unicode map to follow).
+    #[test]
+    fn cjk_fallback_has_no_face_for_korea1_or_identity() {
+        use hayro::hayro_interpret::font::FallbackFontQuery;
+        use hayro::hayro_interpret::hayro_cmap::CharacterCollection;
+        use skrifa::MetadataProvider;
+        let query = |family: CidFamily| {
+            FontQuery::Fallback(FallbackFontQuery {
+                character_collection: Some(CharacterCollection { family, supplement: 0 }),
+                ..FallbackFontQuery::default()
+            })
+        };
+        assert!(super::cjk_fallback(&query(CidFamily::AdobeKorea1)).is_none());
+        assert!(super::cjk_fallback(&query(CidFamily::AdobeIdentity)).is_none());
+        assert!(super::cjk_fallback(&FontQuery::Fallback(FallbackFontQuery::default())).is_none());
+        if pdfcraft_fonts::document_chinese_font().is_none() {
+            eprintln!("built without craft-fonts (CRAFT_FONTS_DIR unset): no Hans face to check");
+            return;
+        }
+        let font = |family: CidFamily| {
+            let (data, index) = super::cjk_fallback(&query(family)).expect("a Hans face stands in for the collection");
+            let font = skrifa::FontRef::from_index((*data).as_ref(), index).expect("a craft-fonts face parses");
+            font.charmap().map('中').is_some()
+        };
+        assert!(font(CidFamily::AdobeGB1), "the GB1 substitute has 中");
+        assert!(font(CidFamily::AdobeCNS1), "the CNS1 substitute has 中");
+    }
+
     /// Half-width katakana are common in Japanese documents set in a non-embedded Mincho font
     /// such as HeiseiMin-W3. The Mincho substitute must have those glyphs: one that lacks them
     /// (Shippori Mincho) draws them as .notdef.
@@ -4695,7 +4801,7 @@ trailer << /Root 1 0 R >>
             character_collection: Some(CharacterCollection { family: CidFamily::AdobeJapan1, supplement: 2 }),
             ..FallbackFontQuery::default()
         });
-        let Some((data, index)) = super::japanese_fallback(&query) else {
+        let Some((data, index)) = super::cjk_fallback(&query) else {
             eprintln!("built without craft-fonts (CRAFT_FONTS_DIR unset): no Japanese face to check");
             return;
         };
@@ -4746,6 +4852,37 @@ trailer << /Root 1 0 R >>
             assert!(missing == notdef, "{base_font}: 𠮷 draws .notdef ({} dark pixels, .notdef {})", inked(&missing), inked(&notdef));
             assert!(inked(&covered) > 300 && covered != notdef, "{base_font}: 吉 is drawn ({} dark pixels)", inked(&covered));
         }
+    }
+
+    /// A CID font that isn't embedded and isn't an Adobe collection (`/Ordering (Identity)`,
+    /// no `/ToUnicode`): the substitute can't map its CIDs by Unicode, and hayro drew the
+    /// substitute's glyph at the CID's index — an unrelated glyph, the mojibake Chinese PDFs
+    /// showed. It draws the substitute's .notdef now, for any CID.
+    #[test]
+    fn identity_cid_fonts_without_to_unicode_draw_notdef_not_garbled_glyphs() {
+        let pdf = "%PDF-1.7
+1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj
+2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj
+3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 100 60] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >> endobj
+4 0 obj << /Length 33 >> stream
+BT /F1 40 Tf 5 15 Td <0000> Tj ET
+endstream endobj
+5 0 obj << /Type /Font /Subtype /Type0 /BaseFont /Unknown-CJK /Encoding /Identity-H /DescendantFonts [6 0 R] >> endobj
+6 0 obj << /Type /Font /Subtype /CIDFontType0 /BaseFont /Unknown-CJK /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >>
+  /FontDescriptor 7 0 R /DW 1000 >> endobj
+7 0 obj << /Type /FontDescriptor /FontName /Unknown-CJK /Flags 4 /FontBBox [0 -141 1000 859] /ItalicAngle 0 /Ascent 859 /Descent -141 /CapHeight 700 /StemV 80 >> endobj
+trailer << /Root 1 0 R >>
+%%EOF";
+        let render = |code: &str| {
+            let pdf = pdf.replace("<0000>", &format!("<{code}>"));
+            let mut r = PageRenderer::new(Arc::new(pdf.into_bytes()), RenderConfig::default());
+            let p = r.render(RenderRequest { page: 0, kind: RequestKind::Pixels, tile: None, scale: 1.0, tag: 0 });
+            assert!(p.error.is_none(), "<{code}>: {:?}", p.error);
+            p.rgba
+        };
+        let notdef = render("0000");
+        let cid = render("4E2D");
+        assert!(cid == notdef, "CID 0x4E2D draws the substitute's .notdef, not an unrelated glyph");
     }
 
     #[test]

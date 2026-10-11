@@ -94,6 +94,13 @@ pub fn document_japanese_font() -> Option<&'static CraftFont> {
     document_face(CRAFT_FONTS, true, false)
 }
 
+/// The face for Chinese text in documents (the substitute for a non-embedded Adobe-GB1 or
+/// Adobe-CNS1 font): the widest-coverage Hans face first (LXGW WenKai), then ZCOOL XiaoWei, then
+/// any other regular `Hans` face. `None` without craft-fonts or when it has no Hans face.
+pub fn document_chinese_font() -> Option<&'static CraftFont> {
+    chinese_document_face(CRAFT_FONTS)
+}
+
 /// A real Japanese document face matching serif/sans and weight where available.
 /// Sans text prefers BIZ UDPGothic Bold or Regular. Missing weights fall back to Regular;
 /// serif text keeps the document Mincho preference. No synthetic weight or slant is applied.
@@ -112,6 +119,16 @@ pub fn document_japanese_fonts_for_style(serif: bool, bold: bool) -> Vec<&'stati
 
 fn document_face(faces: &[CraftFont], serif: bool, bold: bool) -> Option<&CraftFont> {
     document_faces(faces, serif, bold).into_iter().next()
+}
+
+fn chinese_document_face(faces: &[CraftFont]) -> Option<&CraftFont> {
+    let hans = || faces.iter().filter(|f| f.covers("Hans"));
+    for family in ["LXGW WenKai", "ZCOOL XiaoWei"] {
+        if let Some(f) = hans().find(|f| f.family == family && f.style == "Regular") {
+            return Some(f);
+        }
+    }
+    hans().find(|f| f.style == "Regular").or_else(|| hans().next())
 }
 
 fn document_faces(faces: &[CraftFont], serif: bool, bold: bool) -> Vec<&CraftFont> {
@@ -218,6 +235,31 @@ mod tests {
         assert_eq!(order, [b"serif".as_slice(), b"sans", b"bold"]);
         assert!(document_face(&faces[3..], false, true).is_none());
         assert!(document_face(&[], false, true).is_none());
+    }
+
+    #[test]
+    fn chinese_document_face_is_a_regular_hans_face() {
+        // Synthetic faces: the preference must not depend on the real build input.
+        static BYTES: &[u8] = b"fake";
+        static HANS: &[&str] = &["Hans"];
+        static JPAN: &[&str] = &["Jpan"];
+        fn face(family: &'static str, style: &'static str, scripts: &'static [&'static str]) -> CraftFont {
+            CraftFont { family, style, scripts, bytes: BYTES }
+        }
+        let lxgw = || face("LXGW WenKai", "Regular", HANS);
+        let zcool = || face("ZCOOL XiaoWei", "Regular", HANS);
+        let bold = || face("FakeHans", "Bold", HANS);
+        let regular = || face("FakeHans", "Regular", HANS);
+        let biz = || face("BIZ UDPGothic", "Regular", JPAN);
+        // The widest-coverage faces lead, in order.
+        assert_eq!(chinese_document_face(&[zcool(), lxgw(), regular()]).unwrap().family, "LXGW WenKai");
+        assert_eq!(chinese_document_face(&[zcool(), regular()]).unwrap().family, "ZCOOL XiaoWei");
+        // Any other regular Hans face stands in for them, a bold one last.
+        assert_eq!(chinese_document_face(&[bold(), regular()]).unwrap().family, "FakeHans");
+        assert_eq!(chinese_document_face(&[bold()]).unwrap().style, "Bold");
+        // A Japanese face is never the Chinese substitute, and no face is none.
+        assert!(chinese_document_face(&[biz()]).is_none());
+        assert!(chinese_document_face(&[]).is_none());
     }
 
     #[test]
